@@ -1,0 +1,12 @@
+# SwiftPM / Xcode / macOS
+.build/
+.swiftpm/
+build/
+DerivedData/
+ios/*.xcodeproj/
+*.xcworkspace/
+*.xcuserdata/
+*.ipa
+*.dSYM.zip
+*.dSYM
+.DS_Store
