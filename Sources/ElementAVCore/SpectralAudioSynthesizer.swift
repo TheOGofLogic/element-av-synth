@@ -198,15 +198,17 @@ public final class SpectralRenderKernel: @unchecked Sendable {
             ))
         }
 
+        let voiceSpecs = specs
+
         lock.withLock { state in
-            state.voiceCount = specs.count
+            state.voiceCount = voiceSpecs.count
             var ampSum: Float = 0.0
             for i in 0..<Self.maxVoices {
-                if i < specs.count {
-                    state.frequencies[i] = specs[i].frequencyHz
-                    state.amplitudes[i] = specs[i].amplitude
-                    state.pans[i] = specs[i].pan
-                    ampSum += specs[i].amplitude
+                if i < voiceSpecs.count {
+                    state.frequencies[i] = voiceSpecs[i].frequencyHz
+                    state.amplitudes[i] = voiceSpecs[i].amplitude
+                    state.pans[i] = voiceSpecs[i].pan
+                    ampSum += voiceSpecs[i].amplitude
                 } else {
                     state.amplitudes[i] = 0.0
                 }
