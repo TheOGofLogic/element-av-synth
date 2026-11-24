@@ -259,6 +259,11 @@ public final class SpectralRenderKernel: @unchecked Sendable {
         }
     }
 
+    private struct AudioOutputBuffers: @unchecked Sendable {
+        let left: UnsafeMutablePointer<Float>
+        let right: UnsafeMutablePointer<Float>?
+    }
+
     /// Renders `frameCount` frames into `left` (and optional `right`) buffers.
     /// Safe to invoke from the `AVAudioSourceNode` real-time render block.
     @discardableResult
@@ -272,11 +277,15 @@ public final class SpectralRenderKernel: @unchecked Sendable {
             return (0.0, .idle)
         }
 
+        let buffers = AudioOutputBuffers(left: left, right: right)
+
         return lock.withLock { state in
             guard state.isPlaying, state.voiceCount > 0 else {
                 for frame in 0..<frameCount {
-                    left[frame] = 0.0
-                    right?[frame] = 0.0
+                    buffers.left[frame] = 0.0
+                    if let rightPtr = buffers.right {
+                        rightPtr[frame] = 0.0
+                    }
                 }
                 state.lastRMS = 0.0
                 return (0.0, state.lastBeat)
@@ -353,9 +362,9 @@ public final class SpectralRenderKernel: @unchecked Sendable {
                 let outL = tanhf(sampleL * baseScale * env * 1.35)
                 let outR = tanhf(sampleR * baseScale * env * 1.35)
 
-                left[frame] = outL
-                if let right {
-                    right[frame] = outR
+                buffers.left[frame] = outL
+                if let rightPtr = buffers.right {
+                    rightPtr[frame] = outR
                 }
                 sumSquares += 0.5 * (outL * outL + outR * outR)
                 state.elapsedSamples &+= 1
