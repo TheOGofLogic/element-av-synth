@@ -7,6 +7,8 @@ workflows:
       app_store_connect: ChemicalSoundASC
     environment:
       xcode: 16.4
+      groups:
+        - ios_creds
       vars:
         BUNDLE_ID: "com.geraldclerge.elementavsynth"
         XCODE_PROJECT: "ios/ElementAVSynth.xcodeproj"
@@ -23,11 +25,16 @@ workflows:
           if ! command -v xcodegen >/dev/null 2>&1; then
             brew install xcodegen
           fi
+          BUILD_NUM="${PROJECT_BUILD_NUMBER:-1}"
+          sed -i '' "s/CURRENT_PROJECT_VERSION: .*/CURRENT_PROJECT_VERSION: ${BUILD_NUM}/" ios/project.yml
           (cd ios && xcodegen generate)
-          (cd ios && agvtool new-version -all "${PROJECT_BUILD_NUMBER:-1}")
 
           keychain initialize
-          openssl genrsa -out /tmp/dist_cert_key.pem 2048
+          if [ -n "${CERTIFICATE_PRIVATE_KEY:-}" ]; then
+            printf '%s\n' "$CERTIFICATE_PRIVATE_KEY" > /tmp/dist_cert_key.pem
+          else
+            openssl genrsa -out /tmp/dist_cert_key.pem 2048
+          fi
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
             --platform IOS \
             --type IOS_APP_STORE \
@@ -42,6 +49,7 @@ workflows:
           xcode-project build-ipa \
             --project "$XCODE_PROJECT" \
             --scheme "$XCODE_SCHEME"
+          ls -la build/ios/ipa/
 
     artifacts:
       - build/ios/ipa/*.ipa
