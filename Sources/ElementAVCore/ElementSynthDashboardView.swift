@@ -9,6 +9,13 @@ public struct ElementSynthDashboardView: View {
     @State private var useCompositeColor: Bool = false
     @State private var bleStrobeEnabled: Bool = true
     @State private var showFlasher: Bool = false
+    @State private var searchQuery: String = ""
+    @State private var selectedCategory: String = "All"
+    @State private var showPeriodicBrowser: Bool = false
+
+    private var filteredElements: [ChemicalElementSynth] {
+        ElementCatalog.filtered(query: searchQuery, category: selectedCategory)
+    }
 
     public init() {}
 
@@ -139,40 +146,155 @@ public struct ElementSynthDashboardView: View {
     }
 
     private var elementPickerStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                ForEach(ElementCatalog.all) { item in
-                    let isSelected = item.id == synth.selectedElement.id
-                    let swatch = item.dominantLine?.fullIntensityColor ?? .white
-
-                    Button {
-                        synth.selectedElement = item
-                    } label: {
-                        VStack(spacing: 4) {
-                            Text("\(item.id)")
-                                .font(.caption2.monospacedDigit())
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search 118 elements (e.g. Au, Neon, 79)", text: $searchQuery)
+                        .textFieldStyle(.plain)
+                        .font(.subheadline)
+                    if !searchQuery.isEmpty {
+                        Button {
+                            searchQuery = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
                                 .foregroundStyle(.secondary)
-                            Text(item.symbol)
-                                .font(.headline.bold())
-                                .foregroundStyle(.white)
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(swatch)
-                                .frame(width: 34, height: 5)
                         }
-                        .frame(width: 56, height: 64)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(isSelected ? swatch.opacity(0.28) : Color.white.opacity(0.06))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(isSelected ? swatch : Color.white.opacity(0.12), lineWidth: isSelected ? 2 : 1)
-                        )
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+
+                Button {
+                    showPeriodicBrowser = true
+                } label: {
+                    Label("All 118", systemImage: "square.grid.3x3.fill")
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                }
+                .buttonStyle(.bordered)
+                .tint(.cyan)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(ElementCatalog.categories, id: \.self) { category in
+                        let active = selectedCategory == category
+                        Button {
+                            selectedCategory = category
+                        } label: {
+                            Text(category)
+                                .font(.caption2.bold())
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(active ? Color.cyan.opacity(0.28) : Color.white.opacity(0.07), in: Capsule())
+                                .overlay(Capsule().stroke(active ? Color.cyan : Color.white.opacity(0.12), lineWidth: 1))
+                                .foregroundStyle(active ? .white : .secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 10) {
+                    ForEach(filteredElements) { item in
+                        let isSelected = item.id == synth.selectedElement.id
+                        let swatch = item.dominantLine?.fullIntensityColor ?? .white
+
+                        Button {
+                            synth.selectedElement = item
+                        } label: {
+                            VStack(spacing: 4) {
+                                Text("\(item.id)")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                Text(item.symbol)
+                                    .font(.headline.bold())
+                                    .foregroundStyle(.white)
+                                RoundedRectangle(cornerRadius: 3)
+                                    .fill(swatch)
+                                    .frame(width: 34, height: 5)
+                            }
+                            .frame(width: 56, height: 64)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .fill(isSelected ? swatch.opacity(0.28) : Color.white.opacity(0.06))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(isSelected ? swatch : Color.white.opacity(0.12), lineWidth: isSelected ? 2 : 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .frame(height: 68)
+        }
+        .sheet(isPresented: $showPeriodicBrowser) {
+            periodicBrowserSheet
+        }
+    }
+
+    private var periodicBrowserSheet: some View {
+        let columns = [GridItem(.adaptive(minimum: 68), spacing: 10)]
+        return NavigationStack {
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 10) {
+                    ForEach(ElementCatalog.filtered(query: searchQuery, category: selectedCategory)) { item in
+                        let swatch = item.dominantLine?.fullIntensityColor ?? .white
+                        let isSelected = item.id == synth.selectedElement.id
+                        Button {
+                            synth.selectedElement = item
+                            showPeriodicBrowser = false
+                        } label: {
+                            VStack(spacing: 3) {
+                                Text("\(item.id)")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                Text(item.symbol)
+                                    .font(.title3.bold())
+                                    .foregroundStyle(.white)
+                                Text(item.name)
+                                    .font(.system(size: 9))
+                                    .lineLimit(1)
+                                    .foregroundStyle(.secondary)
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(swatch)
+                                    .frame(height: 4)
+                                    .padding(.horizontal, 6)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .fill(isSelected ? swatch.opacity(0.32) : Color.white.opacity(0.07))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(isSelected ? swatch : Color.white.opacity(0.14), lineWidth: isSelected ? 2 : 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle("Periodic Table (118 Elements)")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        showPeriodicBrowser = false
+                    }
                 }
             }
         }
+        .preferredColorScheme(.dark)
     }
 
     private var spectralLinesBarCard: some View {

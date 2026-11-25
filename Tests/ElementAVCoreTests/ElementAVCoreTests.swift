@@ -232,4 +232,50 @@ final class ElementAVCoreTests: XCTestCase {
         )
         XCTAssertEqual(cycleUniforms.meta.y, UInt32(3 % neon.spectralLines.count))
     }
+
+    // MARK: - Full 118-Element Periodic Table Catalog Integrity
+
+    func testFull118ElementCatalogCompletenessAndValidity() throws {
+        let all = ElementCatalog.all
+        XCTAssertEqual(all.count, 118, "Catalog must contain all 118 IUPAC elements")
+
+        let atomicNumbers = all.map(\.id)
+        XCTAssertEqual(atomicNumbers, Array(1...118), "Atomic numbers must be contiguous 1...118")
+
+        let uniqueSymbols = Set(all.map(\.symbol))
+        XCTAssertEqual(uniqueSymbols.count, 118, "All 118 element symbols must be unique")
+
+        XCTAssertEqual(ElementCatalog.element(symbol: "Au")?.id, 79)
+        XCTAssertEqual(ElementCatalog.element(symbol: "Og")?.id, 118)
+        XCTAssertEqual(ElementCatalog.filtered(query: "79").first?.symbol, "Au")
+        XCTAssertEqual(ElementCatalog.filtered(query: "", category: "Noble Gas").count, 7)
+
+        for element in all {
+            XCTAssertGreaterThanOrEqual(element.spectralLines.count, 3, "\(element.symbol) must have >= 3 lines")
+            XCTAssertGreaterThanOrEqual(element.pulseDurationMs, 30)
+            XCTAssertLessThanOrEqual(element.pulseDurationMs, 400)
+
+            let dom = try XCTUnwrap(element.dominantLine)
+            let rgb = dom.srgbComponents
+            XCTAssertGreaterThan(max(rgb.r, max(rgb.g, rgb.b)), 0.1, "\(element.symbol) dominant color must be visible")
+
+            for line in element.spectralLines {
+                XCTAssertGreaterThanOrEqual(line.wavelengthNm, 380.0, "\(element.symbol) wavelength below 380 nm")
+                XCTAssertLessThanOrEqual(line.wavelengthNm, 780.0, "\(element.symbol) wavelength above 780 nm")
+                XCTAssertGreaterThanOrEqual(line.audioFrequencyHz, 109.9)
+                XCTAssertLessThanOrEqual(line.audioFrequencyHz, 2093.1)
+            }
+
+            let uniforms = PlasmaUniformsBuilder.makeUniforms(
+                element: element,
+                beatState: .idle,
+                visualMode: .gentlePulse,
+                elapsedTime: 0.5,
+                intensityScale: 1.0,
+                viewportSize: CGSize(width: 390, height: 844)
+            )
+            XCTAssertGreaterThanOrEqual(uniforms.meta.x, 3)
+            XCTAssertLessThanOrEqual(uniforms.meta.x, 8)
+        }
+    }
 }
