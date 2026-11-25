@@ -9,10 +9,13 @@ public enum ElementBLEUUIDs {
     public static let elementLightService = CBUUID(string: "E1E00001-5A3C-4F92-8B1A-0000A1B2C3D4")
     /// 8-Byte Spectral Light Packet Characteristic UUID (Write / WriteWithoutResponse)
     public static let lightPacketCharacteristic = CBUUID(string: "E1E00002-5A3C-4F92-8B1A-0000A1B2C3D4")
+    /// 6-Byte Hardware Telemetry Characteristic UUID (Notify: Lux, Heatsink °C, FPS)
+    public static let telemetryNotifyCharacteristic = CBUUID(string: "E1E00003-5A3C-4F92-8B1A-0000A1B2C3D4")
 
     /// Nordic UART Service (NUS) fallback for nRF52 / ESP32 prototyping boards
     public static let nordicUARTService = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
     public static let nordicUARTRXCharacteristic = CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
+    public static let nordicUARTTXCharacteristic = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
 
     public static let supportedServices: [CBUUID] = [
         elementLightService,
@@ -23,6 +26,70 @@ public enum ElementBLEUUIDs {
         lightPacketCharacteristic,
         nordicUARTRXCharacteristic
     ]
+
+    public static let supportedNotifyCharacteristics: [CBUUID] = [
+        telemetryNotifyCharacteristic,
+        lightPacketCharacteristic,
+        nordicUARTTXCharacteristic
+    ]
+}
+
+// MARK: - 6-Byte Incoming Hardware Sensor Telemetry Packet
+
+/// Structured 6-byte CoreBluetooth LE Notify telemetry payload from ESP32 / nRF52 receiver:
+/// `[0: 0xBB Header, 1: Lux_MSB, 2: Lux_LSB, 3: HeatsinkTempC (Int8), 4: MeasuredFPS (UInt8), 5: Sum8 CRC]`
+public struct BLESensorTelemetry: Equatable, Sendable {
+    public static let headerByte: UInt8 = 0xBB
+    public static let byteLength: Int = 6
+
+    public let ambientLux: UInt16
+    public let heatsinkTempC: Int8
+    public let measuredFPS: UInt8
+
+    public init(ambientLux: UInt16, heatsinkTempC: Int8, measuredFPS: UInt8) {
+        self.ambientLux = ambientLux
+        self.heatsinkTempC = heatsinkTempC
+        self.measuredFPS = measuredFPS
+    }
+
+    public var data: Data {
+        var bytes: [UInt8] = [
+            Self.headerByte,
+            UInt8((ambientLux >> 8) & 0xFF),
+            UInt8(ambientLux & 0xFF),
+            UInt8(bitPattern: heatsinkTempC),
+            measuredFPS,
+            0x00
+        ]
+        bytes[5] = BLELightPacket.checksum(bytes[0..<5])
+        return Data(bytes)
+    }
+
+    public var checksumByte: UInt8 {
+        data[5]
+    }
+
+    public var hexDescription: String {
+        data.map { String(format: "%02X", $0) }.joined(separator: " ")
+    }
+
+    /// Parses and validates a 6-byte incoming telemetry notification frame (header `0xBB` + Sum8 CRC).
+    public static func parse(_ data: Data) -> BLESensorTelemetry? {
+        guard data.count == byteLength else { return nil }
+        let bytes = [UInt8](data)
+        guard bytes[0] == headerByte else { return nil }
+        guard BLELightPacket.checksum(bytes[0..<5]) == bytes[5] else { return nil }
+
+        let lux = (UInt16(bytes[1]) << 8) | UInt16(bytes[2])
+        let tempC = Int8(bitPattern: bytes[3])
+        let fps = bytes[4]
+
+        return BLESensorTelemetry(
+            ambientLux: lux,
+            heatsinkTempC: tempC,
+            measuredFPS: fps
+        )
+    }
 }
 
 // MARK: - BLE Telemetry & Peripheral Models
@@ -86,6 +153,12 @@ public final class BLELightControllerManager: NSObject, ObservableObject {
     @Published public private(set) var discoveredDevices: [DiscoveredBLEDevice] = []
     @Published public private(set) var connectedDeviceName: String?
     @Published public private(set) var activeCharacteristicUUID: String?
+    @Published public private(set) var notifyCharacteristicUUID: String?
+    @Published public private(set) var isTelemetrySubscribed: Bool = false
+    @Published public private(set) var latestTelemetry: BLESensorTelemetry?
+    @Published public private(set) var lastTelemetryDate: Date?
+    @Published public private(set) var telemetryPacketsReceived: Int = 0
+    @Published public private(set) var telemetryCRCErrorCount: Int = 0
     @Published public private(set) var lastSentPacket: BLELightPacket?
     @Published public private(set) var packetsSentCount: Int = 0
     @Published public private(set) var packetLog: [BLEPacketLogEntry] = []
@@ -96,6 +169,7 @@ public final class BLELightControllerManager: NSObject, ObservableObject {
     private var peripheralsByID: [UUID: CBPeripheral] = [:]
     private var connectedPeripheral: CBPeripheral?
     private var writeCharacteristic: CBCharacteristic?
+    private var notifyCharacteristic: CBCharacteristic?
 
     public var isReadyToSend: Bool {
         connectedPeripheral?.state == .connected && writeCharacteristic != nil
@@ -166,12 +240,20 @@ public final class BLELightControllerManager: NSObject, ObservableObject {
 
     public func disconnect() {
         if let peripheral = connectedPeripheral {
+            if let notifyChar = notifyCharacteristic {
+                peripheral.setNotifyValue(false, for: notifyChar)
+            }
             centralManager?.cancelPeripheralConnection(peripheral)
         }
         connectedPeripheral = nil
         writeCharacteristic = nil
+        notifyCharacteristic = nil
         connectedDeviceName = nil
         activeCharacteristicUUID = nil
+        notifyCharacteristicUUID = nil
+        isTelemetrySubscribed = false
+        latestTelemetry = nil
+        lastTelemetryDate = nil
         connectionState = .idle
     }
 
@@ -311,8 +393,13 @@ extension BLELightControllerManager: CBCentralManagerDelegate {
         Task { @MainActor in
             self.connectedPeripheral = nil
             self.writeCharacteristic = nil
+            self.notifyCharacteristic = nil
             self.connectedDeviceName = nil
             self.activeCharacteristicUUID = nil
+            self.notifyCharacteristicUUID = nil
+            self.isTelemetrySubscribed = false
+            self.latestTelemetry = nil
+            self.lastTelemetryDate = nil
             self.connectionState = message.map { .failed("Disconnected: \($0)") } ?? .idle
         }
     }
@@ -350,13 +437,30 @@ extension BLELightControllerManager: CBPeripheralDelegate {
         }
 
         let characteristics = service.characteristics ?? []
-        let preferred = characteristics.first { char in
+        let preferredWrite = characteristics.first { char in
             ElementBLEUUIDs.supportedWriteCharacteristics.contains(char.uuid)
+                && (char.properties.contains(.writeWithoutResponse) || char.properties.contains(.write))
         } ?? characteristics.first { char in
             char.properties.contains(.writeWithoutResponse) || char.properties.contains(.write)
         }
 
-        guard let target = preferred else { return }
+        let preferredNotify = characteristics.first { char in
+            ElementBLEUUIDs.supportedNotifyCharacteristics.contains(char.uuid)
+                && char.properties.contains(.notify)
+        } ?? characteristics.first { char in
+            char.properties.contains(.notify)
+        }
+
+        if let notifyTarget = preferredNotify {
+            peripheral.setNotifyValue(true, for: notifyTarget)
+            let notifyUUID = notifyTarget.uuid.uuidString
+            Task { @MainActor in
+                self.notifyCharacteristic = notifyTarget
+                self.notifyCharacteristicUUID = notifyUUID
+            }
+        }
+
+        guard let target = preferredWrite else { return }
         let uuidString = target.uuid.uuidString
         let name = peripheral.name ?? "BLE LED Controller"
 
@@ -364,6 +468,39 @@ extension BLELightControllerManager: CBPeripheralDelegate {
             self.writeCharacteristic = target
             self.activeCharacteristicUUID = uuidString
             self.connectionState = .ready(name)
+        }
+    }
+
+    nonisolated public func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateNotificationStateFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        let isNotifying = (error == nil) && characteristic.isNotifying
+        let uuidString = characteristic.uuid.uuidString
+        Task { @MainActor in
+            self.isTelemetrySubscribed = isNotifying
+            if isNotifying {
+                self.notifyCharacteristicUUID = uuidString
+            }
+        }
+    }
+
+    nonisolated public func peripheral(
+        _ peripheral: CBPeripheral,
+        didUpdateValueFor characteristic: CBCharacteristic,
+        error: Error?
+    ) {
+        guard error == nil, let value = characteristic.value else { return }
+        let parsed = BLESensorTelemetry.parse(value)
+        Task { @MainActor in
+            if let telemetry = parsed {
+                self.latestTelemetry = telemetry
+                self.lastTelemetryDate = Date()
+                self.telemetryPacketsReceived += 1
+            } else {
+                self.telemetryCRCErrorCount += 1
+            }
         }
     }
 }

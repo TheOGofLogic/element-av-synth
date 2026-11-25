@@ -95,6 +95,33 @@ final class ElementAVCoreTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(steadyDim.value, 125)
     }
 
+    func testBLESensorTelemetry6ByteRoundTripNegativeTempAndCRCRejection() {
+        let samples: [BLESensorTelemetry] = [
+            BLESensorTelemetry(ambientLux: 0, heatsinkTempC: 0, measuredFPS: 0),
+            BLESensorTelemetry(ambientLux: 1450, heatsinkTempC: 42, measuredFPS: 120),
+            BLESensorTelemetry(ambientLux: 65_535, heatsinkTempC: -15, measuredFPS: 240),
+            BLESensorTelemetry(ambientLux: 512, heatsinkTempC: -40, measuredFPS: 60)
+        ]
+
+        for sample in samples {
+            let raw = sample.data
+            XCTAssertEqual(raw.count, BLESensorTelemetry.byteLength)
+            XCTAssertEqual(raw[0], BLESensorTelemetry.headerByte)
+            XCTAssertEqual(BLESensorTelemetry.parse(raw), sample)
+
+            // Every single byte corruption must invalidate CRC or header
+            for idx in 0..<raw.count {
+                var mutated = raw
+                mutated[idx] ^= 0x01
+                XCTAssertNil(BLESensorTelemetry.parse(mutated), "Corrupting byte \(idx) must fail validation")
+            }
+        }
+
+        // Invalid length & wrong header rejection
+        XCTAssertNil(BLESensorTelemetry.parse(Data([0xBB, 0x00, 0x01])))
+        XCTAssertNil(BLESensorTelemetry.parse(Data([0xAA, 0x00, 0x00, 0x19, 0x3C, 0xFF])))
+    }
+
     // MARK: - AVBeatClock & Photosensitivity Safe Cap
 
     func testBeatClockSafeCapEnforcesMax2Point5Hz() {

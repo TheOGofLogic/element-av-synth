@@ -79,6 +79,9 @@ public struct ElementSynthDashboardView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     elementHeaderCard
+                    if bleManager.isReadyToSend || bleManager.latestTelemetry != nil {
+                        hardwareTelemetryHUDCard
+                    }
                     elementPickerStrip
                     spectralLinesBarCard
                     synthControlsCard
@@ -143,6 +146,51 @@ public struct ElementSynthDashboardView: View {
         }
         .padding()
         .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var hardwareTelemetryHUDCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Circle()
+                    .fill(bleManager.isTelemetrySubscribed ? .green : .orange)
+                    .frame(width: 8, height: 8)
+                Text("Live BLE Hardware Telemetry")
+                    .font(.caption.bold())
+                Spacer()
+                Text("RX \(bleManager.telemetryPacketsReceived)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            if let t = bleManager.latestTelemetry {
+                let tempColor: Color = t.heatsinkTempC >= 60 ? .red : (t.heatsinkTempC >= 45 ? .orange : .green)
+                HStack(spacing: 12) {
+                    telemetryMetricTile(title: "Ambient", value: "\(t.ambientLux) lux", accent: .cyan)
+                    telemetryMetricTile(title: "Heatsink", value: "\(t.heatsinkTempC) °C", accent: tempColor)
+                    telemetryMetricTile(title: "LED Rate", value: "\(t.measuredFPS) FPS", accent: .indigo)
+                }
+            } else {
+                Text("Connected to \(bleManager.connectedDeviceName ?? "BLE LED Controller") — waiting for 6-byte Notify frames...")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func telemetryMetricTile(title: String, value: String, accent: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.subheadline.bold().monospacedDigit())
+                .foregroundStyle(accent)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(Color.black.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var elementPickerStrip: some View {
@@ -476,6 +524,11 @@ public struct ElementSynthDashboardView: View {
                             .font(.caption2.monospaced())
                             .foregroundStyle(.secondary)
                     }
+                    if let notifyUUID = bleManager.notifyCharacteristicUUID {
+                        Text("Notify Char: \(notifyUUID) (\(bleManager.isTelemetrySubscribed ? "Subscribed" : "Pending"))")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
 
                     Toggle("Scan All BLE Devices (Bench Mode)", isOn: $bleManager.scanUnfilteredForBenchTesting)
 
@@ -496,6 +549,39 @@ public struct ElementSynthDashboardView: View {
                             }
                             .buttonStyle(.bordered)
                         }
+                    }
+                }
+
+                Section("Live Hardware Telemetry (6-Byte Notify RX)") {
+                    if let t = bleManager.latestTelemetry {
+                        HStack {
+                            Text("Ambient Photodiode")
+                            Spacer()
+                            Text("\(t.ambientLux) lux")
+                                .font(.body.monospacedDigit())
+                                .foregroundStyle(.cyan)
+                        }
+                        HStack {
+                            Text("Heatsink Temperature")
+                            Spacer()
+                            Text("\(t.heatsinkTempC) °C")
+                                .font(.body.monospacedDigit())
+                                .foregroundStyle(t.heatsinkTempC >= 60 ? .red : .green)
+                        }
+                        HStack {
+                            Text("Measured LED Refresh")
+                            Spacer()
+                            Text("\(t.measuredFPS) FPS")
+                                .font(.body.monospacedDigit())
+                                .foregroundStyle(.indigo)
+                        }
+                        Text("Last RX Frame: \(t.hexDescription)  (RX: \(bleManager.telemetryPacketsReceived), CRC Err: \(bleManager.telemetryCRCErrorCount))")
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Connect to an ESP32 / nRF52 receiver advertising Notify characteristic E1E00003-... (or NUS TX) to stream live ambient lux, heatsink °C, and LED FPS.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
