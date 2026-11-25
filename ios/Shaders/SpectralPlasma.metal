@@ -69,8 +69,8 @@ fragment float4 plasmaFragmentShader(VertexOut in [[stage_in]],
     float dist = length(centered);
     float angle = atan2(centered.y, centered.x);
 
-    float t = uniforms.time;
-    float beatPhase = uniforms.beatPhase;
+    float t = uniforms.timing.x;
+    float beatPhase = uniforms.timing.y;
     float envelope = clamp(uniforms.timing.z, 0.0, 1.0);
     float intensityScale = max(uniforms.timing.w, 0.0);
 
