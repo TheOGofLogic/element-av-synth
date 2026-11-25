@@ -46,6 +46,9 @@ workflows:
       - name: Build & Package Signed IPA
         script: |
           set -euo pipefail
+          if ! xcrun metal --version >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
           xcode-project build-ipa \
             --project "$XCODE_PROJECT" \
             --scheme "$XCODE_SCHEME"
