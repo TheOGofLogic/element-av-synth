@@ -6,7 +6,7 @@ workflows:
     integrations:
       app_store_connect: ChemicalSoundASC
     environment:
-      xcode: 16.4
+      xcode: "27.2"
       groups:
         - ios_creds
       vars:
