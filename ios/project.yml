@@ -13,6 +13,12 @@ targets:
       - path: ../Sources/ElementAVCore
       - path: ../App/ElementAVSynthApp.swift
       - path: Assets.xcassets
+      - path: Shaders
+    dependencies:
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreBluetooth.framework
     info:
       path: Info.plist
       properties:

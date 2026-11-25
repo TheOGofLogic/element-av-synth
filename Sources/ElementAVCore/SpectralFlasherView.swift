@@ -67,6 +67,7 @@ public struct SpectralFlasherView: View {
 
     @StateObject private var displayLink = DisplayLinkDriver()
     @State private var showHUD: Bool = true
+    @State private var useMetalPlasma: Bool = true
     @State private var showStrobeWarningAlert: Bool = false
     @State private var localStartTime: Double = Date().timeIntervalSinceReferenceDate
 
@@ -91,38 +92,22 @@ public struct SpectralFlasherView: View {
         let intensity = min(max(telemetry.envelopeLevel * brightness, 0.0), 1.0)
 
         ZStack {
-            // Metal-backed extended-gamut (Display-P3) full-screen spectral canvas
-            Canvas { context, size in
-                let rect = CGRect(origin: .zero, size: size)
-                let baseColor = Color(
-                    .displayP3,
-                    red: activeRGB.r * intensity,
-                    green: activeRGB.g * intensity,
-                    blue: activeRGB.b * intensity,
-                    opacity: 1.0
-                )
-                context.fill(Path(rect), with: .color(baseColor))
-
-                // Concentric discharge-tube plasma glow synced to envelope
-                let center = CGPoint(x: size.width * 0.5, y: size.height * 0.5)
-                let maxRadius = hypot(size.width, size.height) * (0.35 + 0.35 * intensity)
-                let glow = Gradient(colors: [
-                    Color(.displayP3, red: min(activeRGB.r * 1.25, 1.0), green: min(activeRGB.g * 1.25, 1.0), blue: min(activeRGB.b * 1.25, 1.0), opacity: 0.45 * intensity),
-                    Color.clear
-                ])
-                context.fill(
-                    Path(rect),
-                    with: .radialGradient(glow, center: center, startRadius: 8, endRadius: max(maxRadius, 24))
-                )
+            #if canImport(UIKit) && canImport(MetalKit)
+            if useMetalPlasma {
+                MetalPlasmaView(synth: synth, intensityScale: Float(brightness))
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showHUD.toggle()
+                        }
+                    }
+            } else {
+                solidCanvasView(activeRGB: activeRGB, intensity: intensity)
             }
-            .drawingGroup(opaque: true, colorMode: .extendedLinear)
-            .ignoresSafeArea()
-            .contentShape(Rectangle())
-            .onTapGesture {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    showHUD.toggle()
-                }
-            }
+            #else
+            solidCanvasView(activeRGB: activeRGB, intensity: intensity)
+            #endif
 
             if showHUD {
                 hudOverlay(telemetry: telemetry, activeLine: activeLine)
@@ -192,6 +177,40 @@ public struct SpectralFlasherView: View {
     }
 
     @ViewBuilder
+    private func solidCanvasView(activeRGB: (r: Double, g: Double, b: Double), intensity: Double) -> some View {
+        Canvas { context, size in
+            let rect = CGRect(origin: .zero, size: size)
+            let baseColor = Color(
+                .displayP3,
+                red: activeRGB.r * intensity,
+                green: activeRGB.g * intensity,
+                blue: activeRGB.b * intensity,
+                opacity: 1.0
+            )
+            context.fill(Path(rect), with: .color(baseColor))
+
+            let center = CGPoint(x: size.width * 0.5, y: size.height * 0.5)
+            let maxRadius = hypot(size.width, size.height) * (0.35 + 0.35 * intensity)
+            let glow = Gradient(colors: [
+                Color(.displayP3, red: min(activeRGB.r * 1.25, 1.0), green: min(activeRGB.g * 1.25, 1.0), blue: min(activeRGB.b * 1.25, 1.0), opacity: 0.45 * intensity),
+                Color.clear
+            ])
+            context.fill(
+                Path(rect),
+                with: .radialGradient(glow, center: center, startRadius: 8, endRadius: max(maxRadius, 24))
+            )
+        }
+        .drawingGroup(opaque: true, colorMode: .extendedLinear)
+        .ignoresSafeArea()
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showHUD.toggle()
+            }
+        }
+    }
+
+    @ViewBuilder
     private func hudOverlay(telemetry: AVBeatState, activeLine: SpectralLine?) -> some View {
         VStack(spacing: 16) {
             HStack {
@@ -233,6 +252,12 @@ public struct SpectralFlasherView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+
+                #if canImport(UIKit) && canImport(MetalKit)
+                Toggle("GPU Metal Plasma Discharge", isOn: $useMetalPlasma)
+                    .font(.caption.bold())
+                    .foregroundStyle(.white)
+                #endif
 
                 HStack(spacing: 12) {
                     Button {

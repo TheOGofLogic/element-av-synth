@@ -177,4 +177,59 @@ final class ElementAVCoreTests: XCTestCase {
             XCTAssertLessThanOrEqual(abs(sample), 1.0)
         }
     }
+
+    // MARK: - Metal Plasma Uniform Buffer Layout & Packing
+
+    func testMetalPlasmaUniformMemoryLayoutMatchesMSL16ByteAlignment() {
+        XCTAssertEqual(MemoryLayout<SpectralLineUniformBridge>.stride, 32)
+        XCTAssertEqual(MemoryLayout<SpectralLineUniformBridge>.alignment, 16)
+        XCTAssertEqual(MemoryLayout<PlasmaUniformsBridge>.stride, 304)
+        XCTAssertEqual(MemoryLayout<PlasmaUniformsBridge>.alignment, 16)
+    }
+
+    func testMetalPlasmaUniformBuilderSortsAndClampsTop8Lines() {
+        let neon = ElementCatalog.element(symbol: "Ne")!
+        let beat = AVBeatState(
+            cyclePhase: 0.25,
+            envelopeLevel: 0.85,
+            isFlashOn: true,
+            cycleIndex: 3,
+            effectivePeriodSeconds: 0.4,
+            effectiveRateHz: 2.5
+        )
+
+        let blendUniforms = PlasmaUniformsBuilder.makeUniforms(
+            element: neon,
+            beatState: beat,
+            visualMode: .gentlePulse,
+            elapsedTime: 1.5,
+            intensityScale: 0.9,
+            viewportSize: CGSize(width: 1179, height: 2556)
+        )
+
+        XCTAssertEqual(blendUniforms.meta.x, UInt32(min(neon.spectralLines.count, 8)))
+        XCTAssertEqual(blendUniforms.meta.y, PlasmaUniformsBridge.allLinesMask)
+        XCTAssertEqual(blendUniforms.timing.x, 1.5, accuracy: 1e-5)
+        XCTAssertEqual(blendUniforms.timing.y, 0.25, accuracy: 1e-5)
+        XCTAssertEqual(blendUniforms.timing.z, 0.85, accuracy: 1e-5)
+        XCTAssertEqual(blendUniforms.timing.w, 0.9, accuracy: 1e-5)
+        XCTAssertEqual(blendUniforms.aspectAndViewport.x, Float(1179.0 / 2556.0), accuracy: 1e-4)
+
+        // Strongest Neon line (640.22 nm, intensity 1.0) must be packed at slot 0
+        let slot0 = blendUniforms.line(at: 0)
+        XCTAssertNotNil(slot0)
+        XCTAssertEqual(slot0!.colorAndIntensity.w, 1.0, accuracy: 1e-5)
+        XCTAssertEqual(slot0!.params.y, 640.22, accuracy: 0.05)
+
+        // Multi-line cycle mode must set activeLineIndex = cycleIndex % count
+        let cycleUniforms = PlasmaUniformsBuilder.makeUniforms(
+            element: neon,
+            beatState: beat,
+            visualMode: .lineCycle,
+            elapsedTime: 1.5,
+            intensityScale: 1.0,
+            viewportSize: CGSize(width: 1179, height: 2556)
+        )
+        XCTAssertEqual(cycleUniforms.meta.y, UInt32(3 % neon.spectralLines.count))
+    }
 }
