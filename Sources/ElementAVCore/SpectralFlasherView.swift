@@ -68,6 +68,8 @@ public struct SpectralFlasherView: View {
     @StateObject private var displayLink = DisplayLinkDriver()
     @State private var showHUD: Bool = true
     @State private var useMetalPlasma: Bool = true
+    @State private var touchState: TouchPlasmaState = .idle
+    @State private var basePinchScale: Float = 1.0
     @State private var showStrobeWarningAlert: Bool = false
     @State private var localStartTime: Double = Date().timeIntervalSinceReferenceDate
 
@@ -94,14 +96,63 @@ public struct SpectralFlasherView: View {
         ZStack {
             #if canImport(UIKit) && canImport(MetalKit)
             if useMetalPlasma {
-                MetalPlasmaView(synth: synth, intensityScale: Float(brightness))
-                    .ignoresSafeArea()
+                GeometryReader { geo in
+                    MetalPlasmaView(
+                        synth: synth,
+                        intensityScale: Float(brightness),
+                        touchState: touchState
+                    )
                     .contentShape(Rectangle())
                     .onTapGesture {
                         withAnimation(.easeInOut(duration: 0.2)) {
                             showHUD.toggle()
                         }
                     }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 6)
+                            .onChanged { value in
+                                let w = max(geo.size.width, 1.0)
+                                let h = max(geo.size.height, 1.0)
+                                let u = Float(value.location.x / w)
+                                let v = Float(value.location.y / h)
+                                let nextTouch = TouchPlasmaState(
+                                    uv: SIMD2<Float>(u, v),
+                                    strength: 1.0,
+                                    pinchScale: touchState.pinchScale
+                                )
+                                touchState = nextTouch
+                                synth.filterCutoffNormalized = Double(nextTouch.suggestedFilterCutoffNormalized)
+                            }
+                            .onEnded { _ in
+                                touchState = TouchPlasmaState(
+                                    uv: touchState.uv,
+                                    strength: 0.0,
+                                    pinchScale: touchState.pinchScale
+                                )
+                                synth.filterCutoffNormalized = 1.0
+                            }
+                    )
+                    .simultaneousGesture(
+                        MagnificationGesture()
+                            .onChanged { scale in
+                                let clamped = min(max(basePinchScale * Float(scale), 0.5), 2.5)
+                                touchState = TouchPlasmaState(
+                                    uv: touchState.uv,
+                                    strength: max(touchState.strength, 0.5),
+                                    pinchScale: clamped
+                                )
+                            }
+                            .onEnded { _ in
+                                basePinchScale = touchState.pinchScale
+                                touchState = TouchPlasmaState(
+                                    uv: touchState.uv,
+                                    strength: 0.0,
+                                    pinchScale: touchState.pinchScale
+                                )
+                            }
+                    )
+                }
+                .ignoresSafeArea()
             } else {
                 solidCanvasView(activeRGB: activeRGB, intensity: intensity)
             }
@@ -317,9 +368,10 @@ public struct SpectralFlasherView: View {
                     }
                 }
 
-                Text("Tap background to hide/show controls")
+                Text("Tap for HUD • Drag to bend plasma & sweep LPF (\(Int(SpectralRenderKernel.filterCutoffHz(forNormalized: Float(synth.filterCutoffNormalized)))) Hz) • Pinch to scale")
                     .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white.opacity(0.75))
             }
             .padding()
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))

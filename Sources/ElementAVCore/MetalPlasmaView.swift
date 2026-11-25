@@ -9,6 +9,34 @@ import MetalKit
 import UIKit
 #endif
 
+// MARK: - Interactive Touch-to-Plasma State
+
+public struct TouchPlasmaState: Equatable, Sendable {
+    public var uv: SIMD2<Float>        // Normalized touch coordinates (0...1, 0...1)
+    public var strength: Float         // 0.0 (idle) ... 1.0 (active drag)
+    public var pinchScale: Float       // 0.5 ... 2.5 (pinch zoom / vortex expansion)
+
+    public static let idle = TouchPlasmaState(
+        uv: SIMD2<Float>(0.5, 0.5),
+        strength: 0.0,
+        pinchScale: 1.0
+    )
+
+    public init(uv: SIMD2<Float> = SIMD2<Float>(0.5, 0.5), strength: Float = 0.0, pinchScale: Float = 1.0) {
+        self.uv = SIMD2<Float>(
+            min(max(uv.x, 0.0), 1.0),
+            min(max(uv.y, 0.0), 1.0)
+        )
+        self.strength = min(max(strength, 0.0), 1.0)
+        self.pinchScale = min(max(pinchScale, 0.5), 2.5)
+    }
+
+    /// Maps vertical touch position into normalized audio low-pass filter cutoff (top = 1.0 open, bottom = 0.0 warm).
+    public var suggestedFilterCutoffNormalized: Float {
+        min(max(1.0 - uv.y, 0.05), 1.0)
+    }
+}
+
 // MARK: - 16-Byte-Aligned Metal Uniform Bridge Structs
 
 /// Exact 32-byte layout matching `SpectralLineUniform` in `SpectralPlasma.metal`.
@@ -29,7 +57,7 @@ public struct SpectralLineUniformBridge: Equatable, Sendable {
     }
 }
 
-/// Exact 304-byte layout matching `PlasmaUniforms` in `SpectralPlasma.metal`.
+/// Exact 320-byte layout matching `PlasmaUniforms` in `SpectralPlasma.metal`.
 public struct PlasmaUniformsBridge: Sendable {
     public static let maxSpectralLines: Int = 8
     public static let allLinesMask: UInt32 = 0xFFFF_FFFF
@@ -37,6 +65,7 @@ public struct PlasmaUniformsBridge: Sendable {
     public var timing: SIMD4<Float>            // x: time, y: beatPhase, z: envelopeLevel, w: intensityScale
     public var meta: SIMD4<UInt32>             // x: lineCount, y: activeLineIndex, z: modeRaw, w: reserved
     public var aspectAndViewport: SIMD4<Float> // x: aspectRatio, y: width, z: height, w: reserved
+    public var touchControl: SIMD4<Float>      // x: touchU, y: touchV, z: touchStrength, w: pinchScale
     public var lines: (
         SpectralLineUniformBridge, SpectralLineUniformBridge,
         SpectralLineUniformBridge, SpectralLineUniformBridge,
@@ -52,13 +81,15 @@ public struct PlasmaUniformsBridge: Sendable {
         lineCount: UInt32 = 0,
         activeLineIndex: UInt32 = PlasmaUniformsBridge.allLinesMask,
         visualModeIndex: UInt32 = 0,
-        viewportSize: CGSize = CGSize(width: 1, height: 1)
+        viewportSize: CGSize = CGSize(width: 1, height: 1),
+        touch: TouchPlasmaState = .idle
     ) {
         let w = max(Float(viewportSize.width), 1.0)
         let h = max(Float(viewportSize.height), 1.0)
         self.timing = SIMD4<Float>(time, beatPhase, envelopeLevel, intensityScale)
         self.meta = SIMD4<UInt32>(lineCount, activeLineIndex, visualModeIndex, 0)
         self.aspectAndViewport = SIMD4<Float>(w / h, w, h, 0)
+        self.touchControl = SIMD4<Float>(touch.uv.x, touch.uv.y, touch.strength, touch.pinchScale)
         self.lines = (
             .init(), .init(), .init(), .init(),
             .init(), .init(), .init(), .init()
@@ -103,7 +134,8 @@ public enum PlasmaUniformsBuilder {
         visualMode: StrobeVisualMode,
         elapsedTime: Float,
         intensityScale: Float,
-        viewportSize: CGSize
+        viewportSize: CGSize,
+        touch: TouchPlasmaState = .idle
     ) -> PlasmaUniformsBridge {
         let sortedLines = element.spectralLines
             .sorted { $0.relativeIntensity > $1.relativeIntensity }
@@ -131,7 +163,8 @@ public enum PlasmaUniformsBuilder {
             lineCount: UInt32(topLines.count),
             activeLineIndex: activeLineIndex,
             visualModeIndex: modeIndex,
-            viewportSize: viewportSize
+            viewportSize: viewportSize,
+            touch: touch
         )
 
         for (index, line) in topLines.enumerated() {
@@ -159,10 +192,16 @@ public enum PlasmaUniformsBuilder {
 public struct MetalPlasmaView: UIViewRepresentable {
     @ObservedObject public var synth: SpectralAudioSynthesizer
     public let intensityScale: Float
+    public let touchState: TouchPlasmaState
 
-    public init(synth: SpectralAudioSynthesizer, intensityScale: Float = 1.0) {
+    public init(
+        synth: SpectralAudioSynthesizer,
+        intensityScale: Float = 1.0,
+        touchState: TouchPlasmaState = .idle
+    ) {
         self.synth = synth
         self.intensityScale = intensityScale
+        self.touchState = touchState
     }
 
     public func makeUIView(context: Context) -> MTKView {
@@ -183,16 +222,16 @@ public struct MetalPlasmaView: UIViewRepresentable {
         mtkView.delegate = context.coordinator
 
         context.coordinator.setupPipeline(device: device, mtkView: mtkView)
-        context.coordinator.update(synth: synth, intensityScale: intensityScale)
+        context.coordinator.update(synth: synth, intensityScale: intensityScale, touchState: touchState)
         return mtkView
     }
 
     public func updateUIView(_ uiView: MTKView, context: Context) {
-        context.coordinator.update(synth: synth, intensityScale: intensityScale)
+        context.coordinator.update(synth: synth, intensityScale: intensityScale, touchState: touchState)
     }
 
     public func makeCoordinator() -> Coordinator {
-        Coordinator(synth: synth, intensityScale: intensityScale)
+        Coordinator(synth: synth, intensityScale: intensityScale, touchState: touchState)
     }
 
     @MainActor
@@ -202,17 +241,22 @@ public struct MetalPlasmaView: UIViewRepresentable {
         private var pipelineState: MTLRenderPipelineState?
         private var synth: SpectralAudioSynthesizer
         private var intensityScale: Float
+        private var targetTouch: TouchPlasmaState
+        private var smoothedTouch: TouchPlasmaState
         private let startTime: CFTimeInterval = CACurrentMediaTime()
 
-        init(synth: SpectralAudioSynthesizer, intensityScale: Float) {
+        init(synth: SpectralAudioSynthesizer, intensityScale: Float, touchState: TouchPlasmaState) {
             self.synth = synth
             self.intensityScale = intensityScale
+            self.targetTouch = touchState
+            self.smoothedTouch = touchState
             super.init()
         }
 
-        func update(synth: SpectralAudioSynthesizer, intensityScale: Float) {
+        func update(synth: SpectralAudioSynthesizer, intensityScale: Float, touchState: TouchPlasmaState) {
             self.synth = synth
             self.intensityScale = intensityScale
+            self.targetTouch = touchState
         }
 
         func setupPipeline(device: MTLDevice, mtkView: MTKView) {
@@ -248,6 +292,18 @@ public struct MetalPlasmaView: UIViewRepresentable {
                 return
             }
 
+            // Smooth 120 Hz touch vortex interpolation so filaments gracefully retract on release
+            let posLerp: Float = 0.28
+            let strengthLerp: Float = targetTouch.strength > smoothedTouch.strength ? 0.35 : 0.08
+            smoothedTouch = TouchPlasmaState(
+                uv: SIMD2<Float>(
+                    smoothedTouch.uv.x + (targetTouch.uv.x - smoothedTouch.uv.x) * posLerp,
+                    smoothedTouch.uv.y + (targetTouch.uv.y - smoothedTouch.uv.y) * posLerp
+                ),
+                strength: smoothedTouch.strength + (targetTouch.strength - smoothedTouch.strength) * strengthLerp,
+                pinchScale: smoothedTouch.pinchScale + (targetTouch.pinchScale - smoothedTouch.pinchScale) * 0.22
+            )
+
             let elapsed = CACurrentMediaTime() - startTime
             let snap = synth.liveTelemetry()
             let beat: AVBeatState
@@ -269,7 +325,8 @@ public struct MetalPlasmaView: UIViewRepresentable {
                 visualMode: synth.visualMode,
                 elapsedTime: Float(elapsed),
                 intensityScale: intensityScale,
-                viewportSize: view.drawableSize
+                viewportSize: view.drawableSize,
+                touch: smoothedTouch
             )
 
             encoder.setRenderPipelineState(pipelineState)
@@ -285,7 +342,7 @@ public struct MetalPlasmaView: UIViewRepresentable {
         #include <metal_stdlib>
         using namespace metal;
         struct SpectralLineUniform { float4 colorAndIntensity; float4 params; };
-        struct PlasmaUniforms { float4 timing; uint4 meta; float4 aspectAndViewport; SpectralLineUniform lines[8]; };
+        struct PlasmaUniforms { float4 timing; uint4 meta; float4 aspectAndViewport; float4 touchControl; SpectralLineUniform lines[8]; };
         struct VertexOut { float4 position [[position]]; float2 uv; };
         vertex VertexOut plasmaVertexShader(uint vertexID [[vertex_id]]) {
             VertexOut out;
@@ -304,18 +361,29 @@ public struct MetalPlasmaView: UIViewRepresentable {
             float2 uv = in.uv * 2.0 - 1.0;
             float aspect = max(u.aspectAndViewport.x, 0.1);
             float2 c = (aspect >= 1.0) ? float2(uv.x * aspect, uv.y) : float2(uv.x, uv.y / aspect);
-            float dist = length(c); float angle = atan2(c.y, c.x);
+            float2 tUV = u.touchControl.xy * 2.0 - 1.0;
+            float2 tc = (aspect >= 1.0) ? float2(tUV.x * aspect, tUV.y) : float2(tUV.x, tUV.y / aspect);
+            float tStr = clamp(u.touchControl.z, 0.0, 1.0);
+            float pScale = clamp(u.touchControl.w, 0.5, 2.5);
+            float2 toT = c - tc; float tDist = length(toT);
+            float2 w = c;
+            if (tStr > 0.001) {
+                float sw = tStr * 2.4 * pScale * exp(-tDist * 2.5);
+                w = tc + float2(toT.x * cos(sw) - toT.y * sin(sw), toT.x * sin(sw) + toT.y * cos(sw));
+            }
+            float dist = length(w) / pScale; float angle = atan2(w.y, w.x);
             float n = valueNoise(float2(dist * 3.5 - u.timing.x * 0.8, angle * 2.0 + u.timing.x * 0.3));
             float env = clamp(u.timing.z, 0.0, 1.0);
             float pulse = 1.0 + 0.18 * sin(u.timing.y * 2.0 * M_PI_F) + 0.22 * env;
             float core = exp(-dist * (2.9 / pulse)) * (0.75 + 0.45 * n);
             float corona = exp(-dist * 1.3) * 0.32;
+            float tendril = exp(-tDist * (3.8 / pScale)) * tStr * 0.8;
             uint count = min(u.meta.x, 8u);
             float3 col = float3(0.0);
             for (uint i = 0; i < count; i++) {
                 float focus = (u.meta.y == 0xFFFFFFFFu || u.meta.y == i) ? 1.0 : 0.14;
                 float rip = sin(dist * 16.0 - u.timing.x * (u.lines[i].params.x * 0.0055) + float(i));
-                col += u.lines[i].colorAndIntensity.xyz * (u.lines[i].colorAndIntensity.w * focus * (core + corona * (0.5 + 0.5 * rip)));
+                col += u.lines[i].colorAndIntensity.xyz * (u.lines[i].colorAndIntensity.w * focus * (core + corona * (0.5 + 0.5 * rip) + tendril));
             }
             col *= (0.18 + 0.82 * env) * max(u.timing.w, 0.0);
             col = 1.0 - exp(-col * 1.45);

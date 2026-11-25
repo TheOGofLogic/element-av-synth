@@ -151,6 +151,10 @@ public final class SpectralRenderKernel: @unchecked Sendable {
         var isPlaying: Bool = false
         var masterGain: Float = 0.72
         var harmonicRichness: Float = 0.35
+        var filterCutoffNormalized: Float = 1.0 // 0.0 (~220 Hz) ... 1.0 (~14 kHz wide open)
+        var smoothedFilterCutoff: Float = 1.0
+        var lpStateL: Float = 0.0
+        var lpStateR: Float = 0.0
         var pulseDurationMs: Int = 60
         var dutyCycle: Double = 0.45
         var visualMode: StrobeVisualMode = .gentlePulse
@@ -231,10 +235,26 @@ public final class SpectralRenderKernel: @unchecked Sendable {
                 for i in 0..<Self.maxVoices {
                     state.phases[i] = 0.0
                 }
+                state.lpStateL = 0.0
+                state.lpStateR = 0.0
                 state.lastRMS = 0.0
                 state.lastBeat = .idle
             }
         }
+    }
+
+    /// Modulates the real-time stereo low-pass filter cutoff (`0.0` = ~220 Hz warm hum, `1.0` = ~14 kHz open).
+    public func setFilterCutoff(normalized: Float) {
+        let clamped = min(max(normalized, 0.0), 1.0)
+        lock.withLock { state in
+            state.filterCutoffNormalized = clamped
+        }
+    }
+
+    /// Maps normalized cutoff (`0...1`) logarithmically to Hz (`220 Hz...14,000 Hz`).
+    public static func filterCutoffHz(forNormalized normalized: Float) -> Float {
+        let clamped = min(max(normalized, 0.0), 1.0)
+        return 220.0 * powf(14_000.0 / 220.0, clamped)
     }
 
     public func updateParameters(
@@ -359,8 +379,18 @@ public final class SpectralRenderKernel: @unchecked Sendable {
                 }
 
                 // Apply beat amplitude envelope & gentle soft-clipping limiter
-                let outL = tanhf(sampleL * baseScale * env * 1.35)
-                let outR = tanhf(sampleR * baseScale * env * 1.35)
+                let rawL = tanhf(sampleL * baseScale * env * 1.35)
+                let rawR = tanhf(sampleR * baseScale * env * 1.35)
+
+                // Smooth one-pole low-pass filter modulated by interactive touch gestures
+                state.smoothedFilterCutoff += (state.filterCutoffNormalized - state.smoothedFilterCutoff) * 0.004
+                let cutoffHz = Self.filterCutoffHz(forNormalized: state.smoothedFilterCutoff)
+                let alpha = min(max(1.0 - expf(-twoPi * cutoffHz * invSampleRate), 0.001), 1.0)
+                state.lpStateL += alpha * (rawL - state.lpStateL)
+                state.lpStateR += alpha * (rawR - state.lpStateR)
+
+                let outL = state.lpStateL
+                let outR = state.lpStateR
 
                 buffers.left[frame] = outL
                 if let rightPtr = buffers.right {
@@ -400,6 +430,9 @@ public final class SpectralAudioSynthesizer: ObservableObject {
     }
     @Published public var safeRateCapEnabled: Bool = true {
         didSet { syncKernelParameters() }
+    }
+    @Published public var filterCutoffNormalized: Double = 1.0 {
+        didSet { kernel.setFilterCutoff(normalized: Float(filterCutoffNormalized)) }
     }
     @Published public private(set) var currentBeatState: AVBeatState = .idle
     @Published public private(set) var currentRMS: Float = 0.0

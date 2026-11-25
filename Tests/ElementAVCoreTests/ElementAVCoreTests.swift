@@ -183,8 +183,76 @@ final class ElementAVCoreTests: XCTestCase {
     func testMetalPlasmaUniformMemoryLayoutMatchesMSL16ByteAlignment() {
         XCTAssertEqual(MemoryLayout<SpectralLineUniformBridge>.stride, 32)
         XCTAssertEqual(MemoryLayout<SpectralLineUniformBridge>.alignment, 16)
-        XCTAssertEqual(MemoryLayout<PlasmaUniformsBridge>.stride, 304)
+        XCTAssertEqual(MemoryLayout<PlasmaUniformsBridge>.stride, 320)
         XCTAssertEqual(MemoryLayout<PlasmaUniformsBridge>.alignment, 16)
+    }
+
+    func testTouchPlasmaUniformAndLowPassFilterModulation() {
+        let touch = TouchPlasmaState(uv: SIMD2<Float>(0.25, 0.80), strength: 0.9, pinchScale: 1.6)
+        XCTAssertEqual(touch.suggestedFilterCutoffNormalized, 0.20, accuracy: 1e-5)
+
+        let neon = ElementCatalog.element(symbol: "Ne")!
+        let uniforms = PlasmaUniformsBuilder.makeUniforms(
+            element: neon,
+            beatState: .idle,
+            visualMode: .gentlePulse,
+            elapsedTime: 2.0,
+            intensityScale: 1.0,
+            viewportSize: CGSize(width: 390, height: 844),
+            touch: touch
+        )
+        XCTAssertEqual(uniforms.touchControl.x, 0.25, accuracy: 1e-5)
+        XCTAssertEqual(uniforms.touchControl.y, 0.80, accuracy: 1e-5)
+        XCTAssertEqual(uniforms.touchControl.z, 0.90, accuracy: 1e-5)
+        XCTAssertEqual(uniforms.touchControl.w, 1.60, accuracy: 1e-5)
+
+        // Verify one-pole low-pass filter measurably attenuates a high-pitch violet emission line (380 nm -> 2093 Hz)
+        let violetElement = ChemicalElementSynth(
+            id: 999,
+            symbol: "Vx",
+            name: "Violet Test",
+            atomicMass: 10.0,
+            spectralLines: [SpectralLine(wavelengthNm: 380.0, relativeIntensity: 1.0)]
+        )
+        let frameCount = 4096
+        var leftOpen = [Float](repeating: 0.0, count: frameCount)
+        var leftFiltered = [Float](repeating: 0.0, count: frameCount)
+
+        let openKernel = SpectralRenderKernel()
+        openKernel.configure(
+            element: violetElement,
+            masterGain: 0.8,
+            harmonicRichness: 0.0,
+            dutyCycle: 0.9,
+            visualMode: .spectralStrobe,
+            safeRateCapEnabled: true
+        )
+        openKernel.setFilterCutoff(normalized: 1.0)
+        openKernel.setPlaying(true, resetClock: true)
+        let openResult = leftOpen.withUnsafeMutableBufferPointer { buf in
+            openKernel.renderBlock(sampleRate: 48_000, frameCount: frameCount, left: buf.baseAddress!, right: nil)
+        }
+
+        let filteredKernel = SpectralRenderKernel()
+        filteredKernel.configure(
+            element: violetElement,
+            masterGain: 0.8,
+            harmonicRichness: 0.0,
+            dutyCycle: 0.9,
+            visualMode: .spectralStrobe,
+            safeRateCapEnabled: true
+        )
+        filteredKernel.setFilterCutoff(normalized: 0.0)
+        filteredKernel.setPlaying(true, resetClock: true)
+        // Render 2 blocks so the smooth cutoff ramp settles near 220 Hz
+        _ = leftFiltered.withUnsafeMutableBufferPointer { buf in
+            filteredKernel.renderBlock(sampleRate: 48_000, frameCount: frameCount, left: buf.baseAddress!, right: nil)
+        }
+        let filteredResult = leftFiltered.withUnsafeMutableBufferPointer { buf in
+            filteredKernel.renderBlock(sampleRate: 48_000, frameCount: frameCount, left: buf.baseAddress!, right: nil)
+        }
+
+        XCTAssertGreaterThan(openResult.rms, filteredResult.rms * 2.0, "220 Hz LPF should strongly attenuate 2093 Hz violet tone")
     }
 
     func testMetalPlasmaUniformBuilderSortsAndClampsTop8Lines() {
